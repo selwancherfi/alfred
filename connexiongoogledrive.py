@@ -1,17 +1,16 @@
-from dotenv import load_dotenv
-load_dotenv()
+import os
+import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import os
 
-# Charger les infos d’identification
-SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+# Charger les infos d’identification depuis les secrets Streamlit
+SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_DRIVE_JSON"))
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_ID = "1stVsLUW4HUDAU8O7GgAqHbASf0DlzQNI"
 
-# Connexion à l’API
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES
+# Connexion à l’API Google Drive
+credentials = service_account.Credentials.from_service_account_info(
+    SERVICE_ACCOUNT_INFO, scopes=SCOPES
 )
 service = build("drive", "v3", credentials=credentials)
 
@@ -64,7 +63,7 @@ def creer_dossier(nom_dossier, parent_id=FOLDER_ID):
             "mimeType": "application/vnd.google-apps.folder",
             "parents": [parent_id]
         }
-        file = service.files().create(body=metadata, fields="id").execute()
+        service.files().create(body=metadata, fields="id").execute()
         return f"✅ Dossier « {nom_dossier} » créé avec succès."
     except Exception as e:
         return f"❌ Erreur lors de la création : {str(e)}"
