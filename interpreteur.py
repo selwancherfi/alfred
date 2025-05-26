@@ -1,16 +1,10 @@
 import openai
-import os
+import streamlit as st
 import json
-from dotenv import load_dotenv
 
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def analyser_prompt_drive(prompt_utilisateur):
-    """
-    Analyse un prompt utilisateur en langage naturel et retourne une commande structurée
-    ou "fallback" si l’analyse échoue.
-    """
     system_prompt = """
 Tu es un assistant technique. Ta mission est de convertir une phrase en langage naturel en une commande structurée pour Google Drive.
 

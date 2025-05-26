@@ -1,9 +1,7 @@
 import openai
-import os
-from dotenv import load_dotenv
+import streamlit as st
 
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 def repondre_avec_gpt4(prompt_utilisateur):
     try:

@@ -1,12 +1,9 @@
 import streamlit as st
-from dotenv import load_dotenv
-import os
 from router import router
 from lecturefichiersbase import lire_fichier
 from gpt4 import repondre_avec_gpt4
 
 # Initialisation
-load_dotenv()
 st.set_page_config(page_title="Alfred", page_icon="🤖")
 st.title("Bienvenue, Selwan 👋")
 st.markdown("Je suis Alfred, ton assistant personnel IA.")
@@ -14,7 +11,7 @@ st.markdown("Je suis Alfred, ton assistant personnel IA.")
 # Authentification simple
 if "auth_ok" not in st.session_state:
     mot_de_passe = st.text_input("Mot de passe :", type="password")
-    if mot_de_passe == os.getenv("ALFRED_PASSWORD"):
+    if mot_de_passe == st.secrets["ALFRED_PASSWORD"]:
         st.session_state.auth_ok = True
     else:
         st.stop()
@@ -58,17 +55,14 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Appel au routeur
     reponse = router(prompt)
 
-    # Si le routeur ne traite rien, on passe à GPT-4
     if reponse is None:
         if fichier:
             contenu = lire_fichier(fichier)
             prompt_final = f"{prompt}\n\nVoici le contenu du fichier :\n{contenu}"
         else:
             prompt_final = prompt
-
         reponse = repondre_avec_gpt4(prompt_final)
 
     st.session_state.messages.append({"role": "assistant", "content": reponse})
