@@ -3,17 +3,16 @@ from dotenv import load_dotenv
 import os
 from lecturefichiersbase import lire_fichier
 from gpt4 import repondre_avec_gpt4
-from connexiongoogledrive import lister_fichiers_dossier, creer_dossier, supprimer_element
+from connexiongoogledrive import lister_fichiers_dossier
 
-# Chargement des variables d’environnement
+# Charger les variables d'environnement
 load_dotenv()
 
-# Configuration Streamlit
+# Vérifier mot de passe
 st.set_page_config(page_title="Alfred", page_icon="🤖")
 st.title("Bienvenue, Selwan 👋")
 st.markdown("Je suis Alfred, ton assistant personnel IA.")
 
-# Authentification
 if "auth_ok" not in st.session_state:
     mot_de_passe = st.text_input("Mot de passe :", type="password")
     if mot_de_passe == os.getenv("ALFRED_PASSWORD"):
@@ -26,28 +25,25 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "show_uploader" not in st.session_state:
     st.session_state.show_uploader = False
-if "pending_deletion" not in st.session_state:
-    st.session_state.pending_deletion = None
 
 # Bouton reset
 if st.button("🔄 Réinitialiser la conversation"):
     st.session_state.messages = []
-    st.session_state.pending_deletion = None
     st.rerun()
 
-# Historique
+# Affichage de l’historique
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Prompt
+# Prompt + bouton pièce jointe
 with st.container():
     col1, col2 = st.columns([20, 1])
     prompt = col1.chat_input("Tape ici ta demande…")
     if col2.button("📎"):
         st.session_state.show_uploader = not st.session_state.show_uploader
 
-# Upload
+# Upload de fichiers
 fichier = None
 if st.session_state.show_uploader:
     with st.expander("Choisir un fichier (.txt, .pdf, .docx, .csv)", expanded=True):
@@ -59,44 +55,20 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # Commande spéciale Google Drive
     if prompt.startswith("/drive liste"):
-        nom = prompt.replace("/drive liste", "").strip()
-        reponse_texte = lister_fichiers_dossier(nom if nom else None)
+        nom_sous_dossier = prompt.replace("/drive liste", "").strip()
+        reponse_texte = lister_fichiers_dossier(nom_sous_dossier if nom_sous_dossier else None)
         st.text(reponse_texte)
         st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
-
-    elif prompt.startswith("/drive creer"):
-        nom = prompt.replace("/drive creer", "").strip()
-        if not nom:
-            reponse_texte = "❌ Merci d’indiquer un nom de dossier. Exemple : `/drive creer Budget2025`"
-        else:
-            reponse_texte = creer_dossier(nom)
-        st.text(reponse_texte)
-        st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
-
-    elif prompt.startswith("/drive supprime"):
-        nom = prompt.replace("/drive supprime", "").strip()
-        if not nom:
-            reponse_texte = "❌ Merci d’indiquer un nom de dossier ou fichier à supprimer."
-        else:
-            st.session_state.pending_deletion = nom
-            reponse_texte = f"⚠️ Es-tu sûr de vouloir supprimer « {nom} » ? Tape `/confirme` pour valider."
-        st.text(reponse_texte)
-        st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
-
-    elif prompt.strip() == "/confirme" and st.session_state.pending_deletion:
-        nom = st.session_state.pending_deletion
-        reponse_texte = supprimer_element(nom)
-        st.session_state.pending_deletion = None
-        st.text(reponse_texte)
-        st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
-
     else:
+        # Traitement normal
         if fichier:
             contenu = lire_fichier(fichier)
             prompt_final = f"{prompt}\n\nVoici le contenu du fichier :\n{contenu}"
         else:
             prompt_final = prompt
+
         reponse_texte = repondre_avec_gpt4(prompt_final)
         st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
         with st.chat_message("assistant"):

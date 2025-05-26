@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 import os
 from lecturefichiersbase import lire_fichier
 from gpt4 import repondre_avec_gpt4
-from connexiongoogledrive import lister_fichiers_dossier, creer_dossier, supprimer_element
+from connexiongoogledrive import lister_fichiers_dossier, creer_dossier
 
 # Chargement des variables d’environnement
 load_dotenv()
@@ -26,21 +26,18 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "show_uploader" not in st.session_state:
     st.session_state.show_uploader = False
-if "pending_deletion" not in st.session_state:
-    st.session_state.pending_deletion = None
 
 # Bouton reset
 if st.button("🔄 Réinitialiser la conversation"):
     st.session_state.messages = []
-    st.session_state.pending_deletion = None
     st.rerun()
 
-# Historique
+# Historique affiché
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Prompt
+# Prompt + pièce jointe
 with st.container():
     col1, col2 = st.columns([20, 1])
     prompt = col1.chat_input("Tape ici ta demande…")
@@ -59,12 +56,14 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # Commande spéciale : /drive liste
     if prompt.startswith("/drive liste"):
         nom = prompt.replace("/drive liste", "").strip()
         reponse_texte = lister_fichiers_dossier(nom if nom else None)
         st.text(reponse_texte)
         st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
 
+    # Commande spéciale : /drive creer
     elif prompt.startswith("/drive creer"):
         nom = prompt.replace("/drive creer", "").strip()
         if not nom:
@@ -74,23 +73,7 @@ if prompt:
         st.text(reponse_texte)
         st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
 
-    elif prompt.startswith("/drive supprime"):
-        nom = prompt.replace("/drive supprime", "").strip()
-        if not nom:
-            reponse_texte = "❌ Merci d’indiquer un nom de dossier ou fichier à supprimer."
-        else:
-            st.session_state.pending_deletion = nom
-            reponse_texte = f"⚠️ Es-tu sûr de vouloir supprimer « {nom} » ? Tape `/confirme` pour valider."
-        st.text(reponse_texte)
-        st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
-
-    elif prompt.strip() == "/confirme" and st.session_state.pending_deletion:
-        nom = st.session_state.pending_deletion
-        reponse_texte = supprimer_element(nom)
-        st.session_state.pending_deletion = None
-        st.text(reponse_texte)
-        st.session_state.messages.append({"role": "assistant", "content": reponse_texte})
-
+    # Traitement classique avec GPT
     else:
         if fichier:
             contenu = lire_fichier(fichier)
