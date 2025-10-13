@@ -1,7 +1,30 @@
+# --- ENVIRONNEMENT PYTHON ---
 venv/
 __pycache__/
 *.pyc
 *.pyo
-.DS_Store
+
+# --- FICHIERS DE CONFIGURATION ET SECRETS ---
 .env
-.streamlit/secrets.toml
+.streamlit/
+*.toml
+*.json
+
+# --- LOGS ET MÉMOIRE TEMPORAIRE ---
+*.log
+memoire_alfred.json
+memoire_temp.json
+
+# --- FICHIERS TEMPORAIRES ET CACHE SYSTEME ---
+.DS_Store
+Thumbs.db
+
+# --- ARCHIVES ET EXPORTS ---
+*.zip
+*.tar
+*.gz
+
+# --- FICHIERS DE TEST OU DE BACKUP ---
+*_sauvegarde*.py
+*_old*.py
+test_*.py
