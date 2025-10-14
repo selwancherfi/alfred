@@ -5,11 +5,11 @@ from interpreteur import analyser_prompt_drive
 
 # 🔵 AJOUT — imports nécessaires pour le NLU mémoire
 import json
-from gpt4 import repondre_avec_gpt4
+from llm import repondre_simple as repondre_avec_gpt4
 
 
 def router(prompt):
-    # --- Ta logique existante (brique Google Drive via interpréteur) ---
+    # --- Logique existante (brique Google Drive via interpréteur) ---
     data = analyser_prompt_drive(prompt)
 
     if not data or data.get("action") == "fallback":
@@ -29,7 +29,7 @@ def router(prompt):
         return "❌ Action non reconnue dans la commande interprétée."
 
 
-# ============================== 🔵 AJOUT NLU MÉMOIRE ==============================
+# ============================== 🔵 NLU MÉMOIRE ==============================
 def nlu_memory_intent(utterance: str):
     """
     Détecte si la phrase concerne la mémoire et renvoie un dict:
@@ -77,4 +77,4 @@ Phrase: {utterance}
     except Exception:
         pass
     return None
-# ============================ FIN 🔵 AJOUT NLU MÉMOIRE ============================
+# ============================ FIN 🔵 NLU MÉMOIRE ============================
