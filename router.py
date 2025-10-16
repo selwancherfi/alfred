@@ -3,13 +3,16 @@
 from connexiongoogledrive import lister_fichiers_dossier, creer_dossier, supprimer_element
 from interpreteur import analyser_prompt_drive
 
-# 🔵 AJOUT — imports nécessaires pour le NLU mémoire
+# 🔵 LLM (alias) — on force temperature=None dans notre wrapper local
 import json
-from llm import repondre_simple as repondre_avec_gpt4
+from llm import repondre_simple as _llm_repondre_simple
+
+def repondre_avec_gpt4(prompt: str) -> str:
+    # Compat historique : appel LLM sans temperature explicite
+    return _llm_repondre_simple(prompt, temperature=None)
 
 
 def router(prompt):
-    # --- Logique existante (brique Google Drive via interpréteur) ---
     data = analyser_prompt_drive(prompt)
 
     if not data or data.get("action") == "fallback":
@@ -32,18 +35,8 @@ def router(prompt):
 # ============================== 🔵 NLU MÉMOIRE ==============================
 def nlu_memory_intent(utterance: str):
     """
-    Détecte si la phrase concerne la mémoire et renvoie un dict:
-      {"intent": "...", "text": "...", "category": "..."} ou None
-
-    Intents possibles:
-      - remember            -> "souviens-toi ..." (texte libre)
-      - remember_category   -> "souviens-toi de <cat> : <texte>"
-      - recall              -> "rappelle-toi"
-      - recall_category     -> "rappelle <cat>"
-      - forget              -> "oublie/efface/supprime ..." (texte libre)
-      - import              -> "intègre ceci : <bloc de lignes>"
-
-    Si la phrase NE concerne pas la mémoire -> renvoie None.
+    Détecte si la phrase concerne la mémoire et renvoie un dict ou None.
+    Intents possibles: remember, remember_category, recall, recall_category, forget, import
     """
     if not utterance or not utterance.strip():
         return None
@@ -70,7 +63,6 @@ Phrase: {utterance}
         if isinstance(data, dict) and data.get("intent") in {
             "remember", "remember_category", "recall", "recall_category", "forget", "import"
         }:
-            # garde-fous: normaliser les champs attendus
             data["text"] = (data.get("text") or "").strip()
             data["category"] = (data.get("category") or "").strip()
             return data
