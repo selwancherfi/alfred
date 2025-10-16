@@ -298,7 +298,6 @@ def try_handle_memory_command(user_input: str) -> Tuple[bool, Optional[object]]:
             msg = remember_freeform(payload)
             return True, msg
 
-
     # Lecture (variantes)
     for trig in ["rappelle-toi", "rappelle", "liste mes souvenirs", "liste souvenirs"]:
         if lower.startswith(trig):
@@ -329,11 +328,41 @@ def try_handle_memory_command(user_input: str) -> Tuple[bool, Optional[object]]:
 
     return False, None
 
-# ---------- Exécution directe (debug) ----------
-if __name__ == "__main__":
-    mem = load_memory()
-    print("Mémoire chargée (aperçu clés):", list(mem.keys()))
-    mem["parametres"]["projet_actif"] = "Alfred"
-    save_memory(mem)
-    log_event("Test de log depuis memoire_alfred.py (exécution directe).")
-    print("Sauvegarde effectuée.")
+# ---------- Recherche de souvenirs pertinents (AJOUT MINIMAL) ----------
+def search_relevant_memories(prompt: str, top_k: int = 5, min_ratio: float = 0.25) -> List[Dict[str, str]]:
+    """
+    Renvoie une liste de souvenirs (dicts avec 'date' et 'texte') pertinents pour le prompt.
+    - Parcourt 'souvenirs' ET 'souvenirs_par_categorie'
+    - Classe par similarité grossière (ratio de séquence)
+    - Filtre un bruit trop faible via min_ratio
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        return []
+
+    q = prompt.lower()
+    mem = get_memory()
+    pool: List[Dict[str, str]] = []
+
+    # Souvenirs libres
+    for it in mem.get("souvenirs", []) or []:
+        if isinstance(it, dict) and it.get("texte"):
+            pool.append({"date": it.get("date", ""), "texte": it.get("texte", "")})
+
+    # Souvenirs catégorisés
+    cats = mem.get("souvenirs_par_categorie", {}) or {}
+    for lst in cats.values():
+        for it in lst or []:
+            if isinstance(it, dict) and it.get("texte"):
+                pool.append({"date": it.get("date", ""), "texte": it.get("texte", "")})
+
+    # Scoring très léger (pas d’IA ici pour rester robuste/offline)
+    def _ratio(a: str, b: str) -> float:
+        # implémentation locale simple pour éviter une nouvelle dépendance
+        import difflib
+        return difflib.SequenceMatcher(None, a, b).ratio()
+
+    scored = [( _ratio(q, item["texte"].lower()), item ) for item in pool]
+    scored = [s for s in scored if s[0] >= min_ratio]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    return [item for _, item in scored[:max(1, int(top_k))]]

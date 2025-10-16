@@ -51,6 +51,8 @@ from memoire_alfred import (
     try_handle_memory_command,
     autosave_heartbeat,
     confirm_delete,
+    # ⬇️ ajout : fonction de recherche des souvenirs pertinents
+    search_relevant_memories,
 )
 
 # Sidebar : sélecteur de modèle
@@ -132,12 +134,24 @@ if prompt:
     # 2) Routeur (Drive…)
     reponse = router(prompt)
     if reponse is None:
-        # 3) Fallback LLM (⚠️ pas de temperature)
+        # 3) Fallback LLM — ⬇️ ENRICHI AVEC LES SOUVENIRS PERTINENTS (ajout minimal)
+        try:
+            souvenirs_pertinents = search_relevant_memories(prompt, top_k=5)
+        except Exception:
+            souvenirs_pertinents = []
+
+        contexte_mem = ""
+        if souvenirs_pertinents:
+            contexte_mem = "\n\n🧠 Contexte mémoriel pertinent :\n" + "\n".join(
+                [f"- {m.get('texte','')}" for m in souvenirs_pertinents]
+            )
+
         if fichier:
             contenu = lire_fichier(fichier)
-            prompt_final = f"{prompt}\n\nVoici le contenu du fichier :\n{contenu}"
+            prompt_final = f"{prompt}\n\nVoici le contenu du fichier :\n{contenu}{contexte_mem}"
         else:
-            prompt_final = prompt
+            prompt_final = f"{prompt}{contexte_mem}"
+
         reponse = repondre_simple(prompt_final, temperature=None)
 
     # Affichage réponse
