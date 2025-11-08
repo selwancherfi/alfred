@@ -1,9 +1,9 @@
-# alfred.py — Interface Streamlit Alfred v2.4 (stable)
+# alfred.py — Interface Streamlit Alfred v2.4 (stable, épuré)
 # - Sidebar : compteur + bouton "Gérer les souvenirs"
-# - Panneau de gestion des souvenirs (dans la zone principale)
-# - Suppression avec bannière de confirmation (✅ / ↩️) + historique chat
-# - Routeur Drive intact
-# - Fallback LLM enrichi par la mémoire (answer_with_memories)
+# - Panneau de gestion des souvenirs
+# - Routeur intact (Drive & co)
+# - Fallback LLM enrichi par la mémoire
+# - Intégration email : délégue tout à gestionemails.py (intention + UI persistante)
 
 import os
 import re
@@ -12,16 +12,23 @@ import streamlit as st
 
 from router import router
 from lecturefichiersbase import lire_fichier
-from llm import repondre_simple, set_runtime_model, get_model
+from llm import set_runtime_model, get_model
 
+# --- Brique email (UNIQUEMENT les points d’entrée) ---
+from gestionemails import (
+    email_flow_persist,
+    maybe_bootstrap_email,
+    is_email_intent,
+)
+
+# --- Mémoire ---
 from memoire_alfred import (
     list_memories,
     vote_memory_item,
     confirm_delete,
     try_handle_memory_command,
-    get_memory,
     find_memory_match,
-    answer_with_memories,   # ⚠️ utilisé pour enrichir le fallback LLM
+    answer_with_memories,
 )
 
 # --------------------------- Config page ---------------------------
@@ -124,11 +131,13 @@ with st.sidebar:
 
 # --------------------------- States divers ---------------------------
 st.session_state.setdefault("messages", [])
-st.session_state.setdefault("pending_delete", None)       # payload suppression mémoire à confirmer
-st.session_state.setdefault("manage_memories", False)     # affiche le panneau de gestion mémoire
-st.session_state.setdefault("last_memories_snapshot", []) # cache pour le panneau
+st.session_state.setdefault("pending_delete", None)
+st.session_state.setdefault("manage_memories", False)
+st.session_state.setdefault("last_memories_snapshot", [])
+st.session_state.setdefault("email_ctx", None)      # Contexte d'envoi email (géré par gestionemails)
+st.session_state.setdefault("email_result", None)   # Résultat d'envoi
 
-# --------------------------- Bannière de confirmation (boutons) ---------------------------
+# --------------------------- Bannière confirmation suppression ---------------------------
 def _render_delete_banner():
     payload = st.session_state.get("pending_delete")
     if not payload:
@@ -149,7 +158,7 @@ def _render_delete_banner():
         _push_history("assistant", "Suppression annulée.", "info")
         st.rerun()
 
-# --------------------------- Rendu historique existant ---------------------------
+# --------------------------- Rendu historique ---------------------------
 for m in st.session_state["messages"]:
     with st.chat_message(m["role"]):
         if m["role"] == "assistant":
@@ -162,10 +171,10 @@ for m in st.session_state["messages"]:
         else:
             st.markdown(m["content"])
 
-# Affiche la bannière si une suppression est en attente
+# Affiche la bannière si besoin
 _render_delete_banner()
 
-# --------------------------- Sidebar "Souvenirs (N)" + bouton Gérer ---------------------------
+# --------------------------- Sidebar Souvenirs ---------------------------
 def _mem_count() -> int:
     try:
         items = list_memories(limit=9999)
@@ -183,7 +192,7 @@ with st.sidebar:
         _push_history("assistant", "🔎 J’ouvre le panneau de gestion des souvenirs.", "info")
         st.rerun()
 
-# --------------------------- Panneau de gestion (zone principale) ---------------------------
+# --------------------------- Panneau gestion souvenirs (zone principale) ---------------------------
 def _render_mem_management_panel():
     st.markdown("## 🧠 Gestion des souvenirs")
     items = st.session_state.get("last_memories_snapshot") or []
@@ -230,42 +239,30 @@ def _render_mem_management_panel():
         st.rerun()
 
 # --------------------------- Uploader (optionnel) ---------------------------
-uploaded_file = None
 with st.container():
     cols = st.columns([1, 3, 1])
     with cols[1]:
         uploaded_file = st.file_uploader("Joindre (optionnel)", type=None, label_visibility="collapsed")
 
+# ======= PERSISTENCE UI EMAIL : déléguée à la brique métier =======
+if email_flow_persist(_push_history=_push_history):
+    st.stop()
+
 # --------------------------- Prompt utilisateur ---------------------------
 prompt = st.chat_input("Parle à Alfred...")
 
-# Affiche le panneau si demandé (indépendant de la saisie)
+# Affiche le panneau souvenirs si demandé (indépendant de la saisie)
 if st.session_state.get("manage_memories"):
     _render_mem_management_panel()
 
 # ========================== LOGIQUE ==========================
 if prompt:
-    # Raccourcis "souvenirs" AVANT routeur → on ouvre aussi le panneau
-    p_low = prompt.strip().lower()
-    if ("souvenir" in p_low or "souvenirs" in p_low) and any(x in p_low for x in ["affiche", "montre", "liste", "rappelle"]):
-        _push_history("user", prompt)
-        with st.chat_message("user"): st.markdown(prompt)
-        try:
-            mem_all = list_memories(limit=20)
-        except TypeError:
-            mem_all = list_memories()
-            if isinstance(mem_all, list): mem_all = mem_all[:20]
-        rendered = _render_mem_list(mem_all)
-        _push_history("assistant", rendered, "info")
-        with st.chat_message("assistant"): st.info(rendered)
-        st.session_state["manage_memories"] = True
-        st.rerun()
-
     # Historique : message utilisateur
     _push_history("user", prompt)
-    with st.chat_message("user"): st.markdown(prompt)
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    # Pré-traitement suppression par texte (souplesse)
+    # Pré-traitement suppression par texte
     pre = _preprocess_delete_command(prompt)
     prompt_for_memory = pre if (pre and pre != prompt) else prompt
 
@@ -301,7 +298,11 @@ if prompt:
             elif mem_subtype == "warning":        st.warning(mem_resp)
             elif mem_subtype == "error":          st.error(mem_resp)
             else:                                  st.markdown(mem_resp)
-        # on poursuit le flux (Drive/LLM)
+
+    # ======= Intention email : on bootstrap et on laisse la brique afficher l'UI =======
+    if is_email_intent(prompt):
+        maybe_bootstrap_email(prompt)   # crée le contexte et relance la page
+        st.stop()
 
     # ------------------- Routeur (Drive & co) -------------------
     reponse = router(prompt)

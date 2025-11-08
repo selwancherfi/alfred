@@ -1,4 +1,4 @@
-# router.py — Orchestrateur des briques (Drive / Mémoire / etc.)
+# router.py — Orchestrateur des briques (Drive / Mémoire / Email)
 # RÈGLE D’OR :
 # - Si aucune brique ne prend en charge -> retourner None (le LLM répondra).
 # - Ne renvoyer "error" que si une action reconnue a ÉCHOUÉ en exécution.
@@ -6,6 +6,18 @@
 
 from __future__ import annotations
 import streamlit as st
+
+# --- Email (nouveau) ---
+# La brique email sait détecter l'intention et rendre l'UI.
+# On délègue au début pour éviter que le LLM “mange” la requête.
+try:
+    from gestionemails import is_email_intent, email_flow_persist
+except Exception:
+    # Si la brique n'est pas dispo (import error), on laisse le routeur continuer.
+    def is_email_intent(_: str) -> bool:  # type: ignore
+        return False
+    def email_flow_persist(*args, **kwargs):  # type: ignore
+        return False
 
 from interpreteur import analyser_prompt_drive
 from llm import repondre_simple as _llm_repondre_simple
@@ -45,12 +57,24 @@ def router(prompt: str) -> dict | None:
     """
     Retourne :
       - None quand aucune brique n’a pris en charge (=> fallback LLM dans alfred.py)
-      - dict {content, subtype} quand une brique a répondu (Drive, etc.)
+      - dict {content, subtype} quand une brique a répondu (Drive, Email, etc.)
     """
     if not prompt or not isinstance(prompt, str):
         return None
 
-    # --- Interprétation Drive (brique) ---
+    # ===================== 1) EMAIL — intention rapide =====================
+    try:
+        if is_email_intent(prompt):
+            # La brique email rend l'UI via Streamlit. On lui passe éventuellement
+            # un historique si tu en utilises un dans alfred.py ; ici on garde simple.
+            handled = email_flow_persist()
+            # On renvoie une info courte juste pour bloquer le fallback LLM.
+            return _info("✉️ Interface d’envoi d’email prête.")
+    except Exception as e:
+        # On ne casse pas la conversation si l'email échoue à se lancer
+        return _err(f"Email : impossible d’ouvrir l’interface ({e}).")
+
+    # ===================== 2) DRIVE — interprétation complète =====================
     try:
         intent = analyser_prompt_drive(prompt)
     except Exception:
@@ -66,7 +90,6 @@ def router(prompt: str) -> dict | None:
         return None
 
     # --------- CONFIRMATIONS / ANNULATIONS ---------
-    # On mémorise l'ordre destructif dans l'état; ce routeur utilise la session Streamlit.
     pending = st.session_state.get("pending_drive")
 
     if action == "confirmer":
@@ -74,19 +97,14 @@ def router(prompt: str) -> dict | None:
             return _warn("Je n’ai aucune action en attente à confirmer.")
         if pending.get("action") == "supprimer":
             try:
-                # parent_id si fourni
                 parent_name = pending.get("parent") or ""
                 parent_id = trouver_id_dossier_recursif(parent_name) if parent_name else None
-
-                # suppression PAR NOM (alignée avec connexiongoogledrive.supprimer_element)
                 nom = pending.get("nom") or ""
                 if not nom:
                     st.session_state["pending_drive"] = None
                     return _err("Suppression impossible : nom de l’élément manquant.")
                 msg = supprimer_element(nom, parent_id=parent_id)
                 st.session_state["pending_drive"] = None
-                # Les helpers Drive renvoient déjà un message prêt à afficher
-                # mais on garde un cadre "success" pour cohérence UI
                 if msg.strip().startswith("❌"):
                     return _err(msg)
                 if msg.strip().startswith("🗑️") or msg.strip().startswith("✅"):
@@ -95,7 +113,6 @@ def router(prompt: str) -> dict | None:
             except Exception as e:
                 st.session_state["pending_drive"] = None
                 return _err(f"Erreur lors de la suppression : {e}")
-        # autre ordre en attente non géré ici
         st.session_state["pending_drive"] = None
         return _warn("Rien à confirmer.")
 
@@ -121,12 +138,10 @@ def router(prompt: str) -> dict | None:
         parent_name = intent.get("parent") or ""
         parent_id = trouver_id_dossier_recursif(parent_name) if parent_name else FOLDER_ID
 
-        # LISTER / AFFICHER
         if action in {"lister", "afficher"}:
             listing = lister_fichiers_dossier(None, parent_id)
             return _info(listing)
 
-        # RECHERCHER
         if action == "rechercher":
             terme = intent.get("nom") or intent.get("terme") or ""
             if not terme:
@@ -138,7 +153,6 @@ def router(prompt: str) -> dict | None:
                 return _info("Aucun élément trouvé.")
             return _info(_fmt_liste(res))
 
-        # LIRE / OUVRIR
         if action in {"lire", "ouvrir"}:
             nom = intent.get("nom") or ""
             if not nom:
@@ -150,20 +164,17 @@ def router(prompt: str) -> dict | None:
             contenu = lire_contenu_fichier(file_id)
             return _info(contenu)
 
-        # CRÉER DOSSIER
         if action in {"creer_dossier", "créer_dossier", "creer", "créer"}:
             nom = intent.get("nom") or ""
             if not nom:
                 return _warn("Donne le nom du dossier à créer.")
             msg = creer_dossier(nom, parent_id=parent_id)
-            # la brique Drive renvoie déjà un message prêt à afficher
             if msg.strip().startswith("❌"):
                 return _err(msg)
             return _ok(msg)
 
-        # SUPPRIMER (→ demande de confirmation, pas d’exécution directe)
         if action in {"supprimer", "effacer"}:
-            typ = intent.get("type")  # "fichier"/"dossier" (info pour le message)
+            typ = intent.get("type")
             nom = intent.get("nom") or ""
             if not typ or not nom:
                 return _warn("Pour supprimer : précise **type** (fichier/dossier) et **nom**.")
