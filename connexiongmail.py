@@ -210,11 +210,15 @@ def _build_mime_message(
     reply_to: Optional[str] = None,
     cc: Optional[List[str]] = None,
     bcc: Optional[List[str]] = None,
-    attachments: Optional[List[Dict]] = None,
+    attachments: Optional[List] = None,  # <-- accepte str ou dict
 ) -> EmailMessage:
     """
     Construit un EmailMessage (HTML + PJ).
-    attachments : [{"path": "...", "filename": "..."}] ou {"bytes": b"...", "filename": "...", "mimetype": "..."}
+    attachments :
+      - liste de chemins (str) -> attachés depuis le disque
+      - OU liste de dicts :
+          {"path": "..."}  ou
+          {"bytes": b"...", "filename": "...", "mimetype": "type/sous-type"}
     """
     msg = EmailMessage()
     if from_address:
@@ -237,24 +241,44 @@ def _build_mime_message(
     # Pièces jointes
     if attachments:
         for att in attachments:
-            if "bytes" in att:
-                data = att["bytes"]
-                filename = att.get("filename", "attachment")
-                maintype, subtype = ("application", "octet-stream")
-                if att.get("mimetype"):
-                    maintype, subtype = att["mimetype"].split("/", 1)
-                msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
-            elif "path" in att:
-                path = att["path"]
-                filename = att.get("filename") or os.path.basename(path)
+            # Cas 1 : chemin str directement (compat UI gestionemails.py)
+            if isinstance(att, str):
+                path = att
+                filename = os.path.basename(path)
                 ctype, _ = mimetypes.guess_type(filename)
                 if ctype is None:
                     ctype = "application/octet-stream"
                 maintype, subtype = ctype.split("/", 1)
                 with open(path, "rb") as f:
                     msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=filename)
-            else:
-                raise ValueError("Attachment invalide : fournir 'bytes' ou 'path'.")
+                continue
+
+            # Cas 2 : dict {"bytes": ...} ou {"path": ...}
+            if isinstance(att, dict):
+                if "bytes" in att:
+                    data = att["bytes"]
+                    filename = att.get("filename", "attachment")
+                    mimetype = att.get("mimetype")
+                    if mimetype and "/" in mimetype:
+                        maintype, subtype = mimetype.split("/", 1)
+                    else:
+                        maintype, subtype = ("application", "octet-stream")
+                    msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+                    continue
+
+                if "path" in att:
+                    path = att["path"]
+                    filename = att.get("filename") or os.path.basename(path)
+                    ctype, _ = mimetypes.guess_type(filename)
+                    if ctype is None:
+                        ctype = "application/octet-stream"
+                    maintype, subtype = ctype.split("/", 1)
+                    with open(path, "rb") as f:
+                        msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=filename)
+                    continue
+
+            # Sinon : format non supporté
+            raise ValueError("Attachment invalide : fournir un chemin (str) ou un dict {'bytes':...} / {'path':...}.")
 
     return msg
 
