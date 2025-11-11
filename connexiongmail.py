@@ -1,272 +1,375 @@
-"""
-connexiongmail.py — OAuth Gmail + envoi d'e-mails pour Alfred
-
-Fonctions principales :
-- get_gmail_service() : retourne un client Gmail authentifié (créé/rafraîchi au besoin)
-- list_send_as()      : liste les identités "Envoyer des e-mails en tant que" disponibles
-- send_email(...)     : envoie un e-mail (HTML), avec from_address dynamique, reply-to, cc/bcc, PJ
-
-Prérequis (pip) :
-    pip install --upgrade google-api-python-client google-auth-httplib2 google-auth-oauthlib
-
-Fichiers attendus :
-- credentials.json (ton fichier OAuth téléchargé) — chemin via env GMAIL_CREDENTIALS_FILE
-- token.json (sera créé automatiquement au premier login) — chemin via env GMAIL_TOKEN_FILE
-
-Variables d'environnement (avec valeurs par défaut raisonnables) :
-- GMAIL_CREDENTIALS_FILE : chemin du credentials.json
-- GMAIL_TOKEN_FILE       : chemin du token.json (sera créé)
-- GMAIL_SCOPES           : scopes OAuth, séparés par des espaces
-- GMAIL_DEFAULT_FROM     : expéditeur par défaut (ex : "alfred@selwancirque.com")
-
-Exemples d'utilisation en bas (if __name__ == "__main__":).
-"""
-
-from __future__ import annotations
+# connexiongmail.py — Auth Gmail unifiée (local & cloud) + envoi d'e-mails pour Alfred
 
 import os
 import sys
+import json
 import base64
+import logging
 import mimetypes
-from pathlib import Path
-from typing import Iterable, List, Optional, Dict
+from datetime import datetime
+from typing import List, Optional, Dict
 
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+# -------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-# -------------------------
-# Config & constantes
-# -------------------------
-
-DEFAULT_CREDENTIALS = r"C:\Users\User\Documents\automatisationavecchatgpt\Clefs API et clefs JSON\gmail\gmailsecrets.json"
-DEFAULT_TOKEN       = r"C:\Users\User\Documents\automatisationavecchatgpt\Clefs API et clefs JSON\gmail\token.json"
-
-DEFAULT_SCOPES = [
+# -------------------------------------------------------------------
+# SCOPES — IMPORTANT : sendAs.list nécessite gmail.settings.basic
+# -------------------------------------------------------------------
+SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",  # utile si tu veux lire les réponses plus tard
-    # "https://www.googleapis.com/auth/gmail.modify",  # décommente si tu veux taguer/archiver ensuite
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+    "https://www.googleapis.com/auth/gmail.readonly",
 ]
 
-def _env(key: str, fallback: Optional[str] = None) -> Optional[str]:
-    v = os.getenv(key)
-    return v if (v and v.strip()) else fallback
+# -------------------------------------------------------------------
+# Defaults (fallback local dev uniquement)
+# -------------------------------------------------------------------
+DEFAULT_CREDENTIALS_FILE = os.environ.get(
+    "GMAIL_CREDENTIALS_FILE",
+    r"C:\Users\User\Documents\projetAlfred\Clefs API et clefs JSON\gmail\gmailsecrets.json",
+)
+DEFAULT_TOKEN_FILE = os.environ.get(
+    "GMAIL_TOKEN_FILE",
+    r"C:\Users\User\Documents\projetAlfred\Clefs API et clefs JSON\gmail\token.json",
+)
 
-GMAIL_CREDENTIALS_FILE = _env("GMAIL_CREDENTIALS_FILE", DEFAULT_CREDENTIALS)
-GMAIL_TOKEN_FILE       = _env("GMAIL_TOKEN_FILE",       DEFAULT_TOKEN)
-GMAIL_DEFAULT_FROM     = _env("GMAIL_DEFAULT_FROM",     "alfred@selwancirque.com")
+# -------------------------------------------------------------------
+# Helpers de lecture des secrets (streamlit OU env), JSON ou Base64
+# -------------------------------------------------------------------
+def _get_secret_text(key: str) -> Optional[str]:
+    """Récupère un secret depuis streamlit.secrets (si dispo) ou depuis os.environ."""
+    try:
+        import streamlit as st  # type: ignore
+        if key in st.secrets:
+            val = st.secrets[key]
+            if isinstance(val, (dict, list)):
+                return json.dumps(val)
+            return str(val)
+    except Exception:
+        pass
+    return os.environ.get(key)
 
-_scopes_env = _env("GMAIL_SCOPES")
-if _scopes_env:
-    SCOPES = _scopes_env.split()
-else:
-    SCOPES = DEFAULT_SCOPES
-
-
-# -------------------------
-# Auth / Service
-# -------------------------
-
-def get_gmail_service():
+def _load_json_secret(key_json: str, key_b64: Optional[str] = None) -> Optional[dict]:
     """
-    Retourne un client Gmail authentifié.
-    - Utilise GMAIL_CREDENTIALS_FILE & GMAIL_TOKEN_FILE
-    - Ouvre le flux OAuth dans le navigateur au premier run, puis rafraîchit automatiquement.
+    Charge un JSON depuis :
+      - KEY_JSON (texte JSON brut ou triple-quoted)
+      - sinon KEY_B64 (contenu Base64 d'un JSON)
     """
-    cred_path = Path(GMAIL_CREDENTIALS_FILE)
-    tok_path  = Path(GMAIL_TOKEN_FILE)
+    raw = _get_secret_text(key_json)
+    if raw:
+        raw = raw.strip()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            try:
+                cleaned = raw.replace("\n", "").replace("\r", "").strip()
+                return json.loads(cleaned)
+            except Exception:
+                logger.error("Secret %s présent mais illisible en JSON.", key_json)
+                return None
 
-    if not cred_path.exists():
-        raise FileNotFoundError(
-            f"credentials.json introuvable : {cred_path}\n"
-            f"Place ton fichier OAuth ici ou définis GMAIL_CREDENTIALS_FILE."
-        )
+    if key_b64:
+        b64 = _get_secret_text(key_b64)
+        if b64:
+            try:
+                decoded = base64.b64decode(b64).decode("utf-8")
+                return json.loads(decoded)
+            except Exception:
+                logger.error("Secret %s présent mais Base64/JSON invalide.", key_b64)
+                return None
+    return None
 
-    creds: Optional[Credentials] = None
-    if tok_path.exists():
-        creds = Credentials.from_authorized_user_file(str(tok_path), SCOPES)
+def _build_creds_from_authorized_info(authorized_info: dict, scopes: List[str]) -> Credentials:
+    """
+    Construit des Credentials à partir d'un authorized_user_info (token.json complet).
+    Exige refresh_token, client_id, client_secret, token_uri.
+    """
+    # Utilisation positionnelle pour éviter l'erreur d'argument nommé.
+    creds = Credentials.from_authorized_user_info(authorized_info, scopes)
+    if not creds.valid and creds.refresh_token:
+        creds.refresh(Request())
+    return creds
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            # rafraîchit automatiquement
-            creds.refresh(Request())
-        else:
-            # premier run : lance le flow OAuth (navigateur)
-            flow = InstalledAppFlow.from_client_secrets_file(str(cred_path), SCOPES)
-            creds = flow.run_local_server(port=0)  # ouvre http://localhost:xxxx pour capter le code
+def _headless_mode_detected() -> bool:
+    """
+    Headless si :
+      - STREAMLIT_RUNTIME présent OU
+      - secrets JSON présents OU
+      - FORBID_OAUTH_INTERACTIVE=1
+    """
+    if os.environ.get("STREAMLIT_RUNTIME"):
+        return True
+    if _get_secret_text("GMAIL_CREDENTIALS_JSON") or _get_secret_text("GMAIL_CREDENTIALS_B64"):
+        return True
+    if _get_secret_text("GMAIL_TOKEN_JSON") or _get_secret_text("GMAIL_TOKEN_B64"):
+        return True
+    if os.environ.get("FORBID_OAUTH_INTERACTIVE") == "1":
+        return True
+    return False
 
-        # persiste le token
-        tok_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tok_path, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
+# -------------------------------------------------------------------
+# Auth principale : secrets -> fichiers -> (optionnel) OAuth interactif en local
+# -------------------------------------------------------------------
+def get_gmail_service() -> "googleapiclient.discovery.Resource":
+    """
+    Retourne un client Gmail authentifié. Priorité aux secrets JSON.
+    - Prod/cloud : JAMAIS d'OAuth interactif ni d'écriture disque.
+    - Local : fallback fichiers + OAuth interactif possible pour régénérer un token.
+    """
+    headless = _headless_mode_detected()
 
-    service = build("gmail", "v1", credentials=creds)
-    return service
+    # 1) Secrets JSON (prod / simulation prod)
+    creds_json = _load_json_secret("GMAIL_CREDENTIALS_JSON", "GMAIL_CREDENTIALS_B64")
+    token_json = _load_json_secret("GMAIL_TOKEN_JSON", "GMAIL_TOKEN_B64")
 
+    if creds_json and token_json:
+        logger.info("Auth Gmail : utilisation des secrets JSON (headless=%s).", headless)
+        creds = _build_creds_from_authorized_info(token_json, SCOPES)
+        return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
-# -------------------------
+    # 2) Fichiers (local dev)
+    if os.path.exists(DEFAULT_TOKEN_FILE):
+        try:
+            with open(DEFAULT_TOKEN_FILE, "r", encoding="utf-8") as f:
+                token_info = json.load(f)
+            creds = _build_creds_from_authorized_info(token_info, SCOPES)
+            logger.info("Auth Gmail : token fichier local.")
+            return build("gmail", "v1", credentials=creds, cache_discovery=False)
+        except Exception as e:
+            logger.warning("Token local illisible/expiré : %s", e)
+
+    if os.path.exists(DEFAULT_CREDENTIALS_FILE):
+        if headless:
+            raise RuntimeError(
+                "Auth Gmail : credentials présents mais environnement headless.\n"
+                "Fournis GMAIL_CREDENTIALS_JSON et GMAIL_TOKEN_JSON dans les secrets,"
+                " ou exécute la réauth en local puis colle le token dans les secrets."
+            )
+        # OAuth interactif (LOCAL UNIQUEMENT)
+        logger.info("Auth Gmail : OAuth interactif local (run_local_server).")
+        flow = InstalledAppFlow.from_client_secrets_file(DEFAULT_CREDENTIALS_FILE, SCOPES)
+        creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+        # Persistance locale du token pour les prochains lancements
+        try:
+            with open(DEFAULT_TOKEN_FILE, "w", encoding="utf-8") as f:
+                f.write(creds.to_json())
+            logger.info("Token local sauvegardé : %s", DEFAULT_TOKEN_FILE)
+        except Exception as e:
+            logger.warning("Impossible d'écrire le token local : %s", e)
+        return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+    # 3) Rien de disponible
+    raise RuntimeError(
+        "Auth Gmail : aucun secret JSON ni fichier disponible.\n"
+        "→ Ajoute GMAIL_CREDENTIALS_JSON et GMAIL_TOKEN_JSON aux secrets (prod),\n"
+        "  ou fournis GMAIL_CREDENTIALS_FILE / GMAIL_TOKEN_FILE en local."
+    )
+
+# -------------------------------------------------------------------
 # Utilitaires
-# -------------------------
+# -------------------------------------------------------------------
+def who_am_i(service) -> str:
+    """Retourne l'adresse principale du compte authentifié."""
+    profile = service.users().getProfile(userId="me").execute()
+    return profile.get("emailAddress")
 
 def list_send_as(service) -> List[str]:
     """
-    Retourne les adresses "Envoyer en tant que" autorisées sur ce compte.
-    (Nécessaire si tu veux vérifier que 'alfred@...' est bien utilisable.)
+    Retourne la liste des adresses utilisables (strings).
+    Requiert le scope gmail.settings.basic.
     """
-    resp = service.users().settings().sendAs().list(userId="me").execute()
-    addrs = [entry.get("sendAsEmail") for entry in resp.get("sendAs", [])]
-    return [a for a in addrs if a]
+    try:
+        resp = service.users().settings().sendAs().list(userId="me").execute()
+        return [s.get("sendAsEmail") for s in resp.get("sendAs", []) if s.get("sendAsEmail")]
+    except HttpError as e:
+        if e.resp.status == 403:
+            raise PermissionError(
+                "Permissions insuffisantes pour lister les alias (sendAs). "
+                "Ajoute le scope 'gmail.settings.basic' au token et régénère-le."
+            ) from e
+        raise
 
-
-def _assert_from_allowed(service, from_address: str):
-    allowed = list_send_as(service)
-    if from_address not in allowed:
-        raise ValueError(
-            f"L'adresse From '{from_address}' n'est pas autorisée sur ce compte.\n"
-            f"Autorisé(e)s : {allowed}\n"
-            f"Vérifie Gmail > Paramètres > Comptes et importation > Envoyer des e-mails en tant que."
-        )
-
-
-def _guess_mime_type(path: Path) -> str:
-    mtype, _ = mimetypes.guess_type(str(path))
-    return mtype or "application/octet-stream"
-
-
-# -------------------------
-# Envoi d'e-mail
-# -------------------------
-
-def send_email(
-    service,
-    to: str | Iterable[str],
+def _build_mime_message(
+    to: str,
     subject: str,
     html_body: str,
     from_address: Optional[str] = None,
     reply_to: Optional[str] = None,
-    cc: Optional[Iterable[str]] = None,
-    bcc: Optional[Iterable[str]] = None,
-    attachments: Optional[Iterable[str]] = None,
-    headers: Optional[Dict[str, str]] = None,
-) -> Dict:
+    cc: Optional[List[str]] = None,
+    bcc: Optional[List[str]] = None,
+    attachments: Optional[List[Dict]] = None,
+) -> EmailMessage:
     """
-    Envoie un e-mail via l'API Gmail.
-
-    - from_address : l'expéditeur voulu (doit être dans "Envoyer des e-mails en tant que").
-                     par défaut = GMAIL_DEFAULT_FROM
-    - reply_to     : si défini, force l'adresse de réponse
-    - attachments  : liste de chemins de fichiers à joindre
-    - headers      : dict d'en-têtes additionnels (ex : {"List-ID": "..."} )
-
-    Retourne la réponse de l'API Gmail (dict).
+    Construit un EmailMessage (HTML + PJ).
+    attachments : [{"path": "...", "filename": "..."}] ou {"bytes": b"...", "filename": "...", "mimetype": "..."}
     """
-    from_address = from_address or GMAIL_DEFAULT_FROM
-
-    # Vérifie que l'adresse "From" est bien autorisée
-    _assert_from_allowed(service, from_address)
-
-    # Normalise destinataires
-    if isinstance(to, str):
-        to_list = [to]
-    else:
-        to_list = list(to)
-
-    cc_list  = list(cc) if cc else []
-    bcc_list = list(bcc) if bcc else []
-
     msg = EmailMessage()
+    if from_address:
+        msg["From"] = from_address
+    msg["To"] = to
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    if bcc:
+        msg["Bcc"] = ", ".join(bcc)
     msg["Subject"] = subject
-    msg["From"]    = from_address
-    msg["To"]      = ", ".join(to_list)
-    if cc_list:
-        msg["Cc"] = ", ".join(cc_list)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid()
     if reply_to:
         msg["Reply-To"] = reply_to
 
-    # Corps HTML (et texte brut minimal fallback)
-    msg.set_content("Version texte : ouvrez ce message en HTML pour une meilleure mise en forme.")
-    msg.add_alternative(html_body, subtype="html")
+    # Corps HTML
+    msg.set_content("Version texte non fournie.")
+    msg.add_alternative(html_body or "", subtype="html")
 
     # Pièces jointes
     if attachments:
-        for p in attachments:
-            pth = Path(p)
-            if not pth.exists():
-                raise FileNotFoundError(f"Pièce jointe introuvable : {pth}")
-            mtype = _guess_mime_type(pth)
-            maintype, _, subtype = mtype.partition("/")
-            with open(pth, "rb") as f:
-                data = f.read()
-            msg.add_attachment(data, maintype=maintype, subtype=subtype or "octet-stream", filename=pth.name)
+        for att in attachments:
+            if "bytes" in att:
+                data = att["bytes"]
+                filename = att.get("filename", "attachment")
+                maintype, subtype = ("application", "octet-stream")
+                if att.get("mimetype"):
+                    maintype, subtype = att["mimetype"].split("/", 1)
+                msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=filename)
+            elif "path" in att:
+                path = att["path"]
+                filename = att.get("filename") or os.path.basename(path)
+                ctype, _ = mimetypes.guess_type(filename)
+                if ctype is None:
+                    ctype = "application/octet-stream"
+                maintype, subtype = ctype.split("/", 1)
+                with open(path, "rb") as f:
+                    msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=filename)
+            else:
+                raise ValueError("Attachment invalide : fournir 'bytes' ou 'path'.")
 
-    # En-têtes additionnels
-    if headers:
-        for k, v in headers.items():
-            msg[k] = v
+    return msg
 
-    # Encodage base64url
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
-
-    sent = service.users().messages().send(
-        userId="me",
-        body={"raw": raw}
-    ).execute()
-
-    return sent
-
-
-# -------------------------
-# CLI / Test rapide
-# -------------------------
-
-def _demo():
+def send_email(
+    service,
+    to: str,
+    subject: str,
+    html_body: str,
+    from_address: Optional[str] = None,
+    reply_to: Optional[str] = None,
+    cc: Optional[List[str]] = None,
+    bcc: Optional[List[str]] = None,
+    attachments: Optional[List[Dict]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Dict:
     """
-    Test simple :
-      - Auth si besoin (ouvre le navigateur)
-      - Affiche les adresses 'Envoyer en tant que'
-      - Envoie un message de test à toi-même
+    Envoie un e-mail via Gmail API.
+    - Vérifie que 'from_address' est autorisé si fourni.
+    - Ajoute des headers personnalisés si fournis.
     """
-    print("Initialisation du service Gmail…")
-    service = get_gmail_service()
+    if from_address:
+        allowed = list_send_as(service)
+        if from_address not in allowed:
+            raise ValueError(
+                f"L'adresse d'expédition '{from_address}' n'est pas autorisée sur ce compte. "
+                f"Aliases disponibles : {allowed}"
+            )
 
-    allowed = list_send_as(service)
-    print("Adresses 'Envoyer en tant que' autorisées :", allowed)
-
-    # Choisis ici l'expéditeur voulu
-    from_addr = os.getenv("DEMO_FROM", GMAIL_DEFAULT_FROM)
-
-    # Destinataire de test (toi-même)
-    to_addr = os.getenv("DEMO_TO", "selwancirque@selwancirque.com")
-
-    html = """
-    <div style="font-family:Inter,Arial,sans-serif;font-size:15px">
-      <p>Bonjour Selwan,</p>
-      <p>Ceci est un <b>test d'envoi via l'API Gmail</b> depuis Alfred.</p>
-      <p>Expéditeur sélectionné : <code>{from_addr}</code></p>
-      <p>Si tu vois ce message, la connexion OAuth et l'envoi fonctionnent ✅</p>
-      <hr>
-      <small>Alfred • Test Gmail API</small>
-    </div>
-    """.format(from_addr=from_addr)
-
-    print(f"Envoi d'un test à {to_addr} depuis {from_addr}…")
-    resp = send_email(
-        service=service,
-        to=to_addr,
-        subject="Alfred • Test Gmail API",
-        html_body=html,
-        from_address=from_addr,
-        reply_to="selwan@selwancirque.com",  # met ce que tu veux
+    # Construction du message
+    msg = _build_mime_message(
+        to=to,
+        subject=subject,
+        html_body=html_body,
+        from_address=from_address,
+        reply_to=reply_to,
+        cc=cc,
+        bcc=bcc,
+        attachments=attachments,
     )
-    print("OK, message envoyé. ID :", resp.get("id"))
+
+    # Ajout éventuel des headers personnalisés
+    if headers:
+        for key, value in headers.items():
+            msg[key] = value
+
+    import base64 as _b64
+    raw = _b64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+
+    try:
+        sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return sent
+    except HttpError as e:
+        if e.resp.status == 403:
+            raise PermissionError(
+                "Envoi refusé (403). Vérifie les scopes du token et/ou l'alias 'From:'."
+            ) from e
+        raise
+
+
+# -------------------------------------------------------------------
+# Utilitaire CLI : régénérer un token local avec les SCOPES ci-dessus
+# -------------------------------------------------------------------
+def _reauth_local() -> None:
+    """
+    Ouvre un navigateur EN LOCAL pour consentir aux SCOPES et
+    écrit le token.json sur disque + affiche son contenu JSON (à copier dans les secrets).
+    """
+    if not os.path.exists(DEFAULT_CREDENTIALS_FILE):
+        raise FileNotFoundError(
+            f"credentials/client OAuth introuvable : {DEFAULT_CREDENTIALS_FILE}\n"
+            "→ Télécharge le fichier client (type 'Desktop') et mets-le à cet emplacement "
+            "ou passe GMAIL_CREDENTIALS_FILE dans l'environnement."
+        )
+    flow = InstalledAppFlow.from_client_secrets_file(DEFAULT_CREDENTIALS_FILE, SCOPES)
+    creds = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+    try:
+        with open(DEFAULT_TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(creds.to_json())
+        logger.info("Nouveau token écrit : %s", DEFAULT_TOKEN_FILE)
+    except Exception as e:
+        logger.warning("Impossible d'écrire le token local : %s", e)
+    print("\n=== TOKEN.JSON À COLLER DANS GMAIL_TOKEN_JSON (secrets) ===\n")
+    print(creds.to_json())
+    print("\n===========================================================\n")
+
+# -------------------------------------------------------------------
+# Demo / CLI
+# -------------------------------------------------------------------
+def _demo():
+    svc = get_gmail_service()
+    me = who_am_i(svc)
+    logger.info("Connecté en tant que : %s", me)
+
+    try:
+        send_as = list_send_as(svc)
+        logger.info("Aliases disponibles : %s", send_as)
+    except PermissionError as e:
+        logger.warning(str(e))
+
+    if os.environ.get("GMAIL_SEND_TEST") == "1":
+        default_from = _get_secret_text("GMAIL_DEFAULT_FROM")
+        to_addr = os.environ.get("GMAIL_TEST_TO", me)
+        html = f"<p>Test Alfred • {datetime.now().isoformat()}</p>"
+        resp = send_email(
+            service=svc,
+            to=to_addr,
+            subject="Alfred • Test Gmail API",
+            html_body=html,
+            from_address=default_from,
+            reply_to=None,
+        )
+        logger.info("Message envoyé. ID : %s", resp.get("id"))
 
 if __name__ == "__main__":
-    try:
-        _demo()
-    except Exception as e:
-        print("\n❌ Erreur :", e, file=sys.stderr)
-        sys.exit(1)
+    if "--reauth" in sys.argv:
+        _reauth_local()
+        sys.exit(0)
+    _demo()
