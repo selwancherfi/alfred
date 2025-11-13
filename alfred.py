@@ -257,6 +257,12 @@ if st.session_state.get("manage_memories"):
 
 # ========================== LOGIQUE ==========================
 if prompt:
+
+    # === DEBUG TEMPORAIRE : voir la vraie valeur reçue online par Streamlit ===
+    st.sidebar.caption(f"[debug] prompt={repr(prompt)}")
+    st.sidebar.caption(f"[debug] is_email_intent={is_email_intent(prompt)}")
+    # ==========================================================================
+
     # Historique : message utilisateur
     _push_history("user", prompt)
     with st.chat_message("user"):
