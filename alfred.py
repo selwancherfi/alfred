@@ -299,13 +299,19 @@ if prompt:
             elif mem_subtype == "error":          st.error(mem_resp)
             else:                                  st.markdown(mem_resp)
 
-    # ======= Intention email : on bootstrap et on laisse la brique afficher l'UI =======
-    if is_email_intent(prompt):
-        maybe_bootstrap_email(prompt)   # crée le contexte et relance la page
-        st.stop()
+    # ------------------- Routeur (email / Drive / mémoire) -------------------
+    reponse = None
+    routed = router(prompt)
 
-    # ------------------- Routeur (Drive & co) -------------------
-    reponse = router(prompt)
+    # Cas spécial : le routeur a bootstrappé l'UI email
+    if isinstance(routed, dict) and routed.get("_type") == "ui_email_bootstrapped":
+        # maybe_bootstrap_email() a rempli email_ctx ; email_flow_persist() en haut de page
+        # va prendre la main après rerun.
+        st.rerun()
+
+    # Sinon, si une brique a produit une réponse "texte"
+    if routed is not None:
+        reponse = routed
 
     # ------------------- Fallback LLM enrichi par la mémoire -------------------
     if reponse is None:
@@ -316,6 +322,7 @@ if prompt:
             prompt_final = prompt
         text = answer_with_memories(prompt_final, k=7)
         reponse = {"content": text, "subtype": None}
+
 
     # ------------------- Affichage final -------------------
     if isinstance(reponse, dict):
