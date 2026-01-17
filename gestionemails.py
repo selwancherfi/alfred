@@ -11,8 +11,6 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
-import unicodedata  # <-- ajouté pour la normalisation du texte
-
 import streamlit as st
 from googleapiclient.http import MediaIoBaseDownload
 
@@ -29,25 +27,9 @@ TRIGGERS = [
     "écrire un mail","écrire un email","mail à","email à","/mail","/email"
 ]
 
-# Nouvelle détection plus tolérante : accents, fautes légères, "envoie mail", etc.
-_EMAIL_RE = re.compile(
-    r"\b(envoi[sezr]?|envoy(?:er|e|ez|ons|es|e)|ecris|écris|ecrire|écrire)\b.*\b(mail|email|courriel|m[èe]l)\b",
-    re.I,
-)
-
-def _norm_email_text(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
-    s = re.sub(r"\s+", " ", s)
-    return s
-
 def is_email_intent(text: str) -> bool:
-    low = _norm_email_text(text)
-    # 1) Ancienne logique (compat TB)
-    if any(t in low for t in TRIGGERS):
-        return True
-    # 2) Nouvelle logique plus large : "envoie/envois/envoyer/écris… + mail/email/mèl…"
-    return bool(_EMAIL_RE.search(low))
+    low = (text or "").lower()
+    return any(t in low for t in TRIGGERS)
 
 # ========================= Helpers rendu / parsing =========================
 
@@ -286,10 +268,7 @@ def email_flow_persist(_push_history=None) -> bool:
                 for p in ctx["attachments"]:
                     st.write(f"• {Path(p).name}")
 
-            # Lien Gmail générique (toujours dispo)
-            st.link_button("Ouvrir Gmail (boîte d’envoi)", "https://mail.google.com/mail/u/0/#sent")
-
-            # Diagnostics / lien direct si on récupère les métadonnées du message
+            # Lien Gmail + diagnostics
             if isinstance(res, dict) and res.get("id"):
                 try:
                     svc = get_gmail_service()
@@ -389,20 +368,8 @@ def email_flow_persist(_push_history=None) -> bool:
         if recaps:
             st.markdown("**Pièces jointes sélectionnées :**\n" + "\n".join(recaps))
 
-        # Boutons Envoyer / Annuler
-        col_send, col_cancel = st.columns([1, 1])
-        with col_send:
-            if st.button("✅ Envoyer"):
-                _do_send_now()
-        with col_cancel:
-            if st.button("Annuler"):
-                # Reset complet du contexte email
-                st.session_state["email_ctx"] = None
-                st.session_state["email_result"] = None
-                st.session_state["email_result_check"] = None
-                st.session_state["email_local_files"] = []
-                st.session_state["email_drive_added"] = []
-                st.rerun()
+        if st.button("✅ Envoyer"):
+            _do_send_now()
 
     return True
 
